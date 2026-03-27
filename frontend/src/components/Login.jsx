@@ -1,17 +1,44 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Mail, Lock, ArrowRight } from 'lucide-react';
+import { STORAGE_KEYS, getStoredUsers } from '../data/mockData';
 
 export default function Login() {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
+  const [email, setEmail] = useState('satoshi@bitcoin.org');
+  const [password, setPassword] = useState('12345678');
+  const [error, setError] = useState('');
   const navigate = useNavigate();
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    console.log("Login submitted:", { email, password });
-    // Simulate API call and redirect
+    const users = getStoredUsers();
+    const foundUser = users.find(
+      (user) => user.email.toLowerCase() === email.toLowerCase() && user.password === password,
+    );
+
+    if (!foundUser) {
+      setError('Email atau password salah. Gunakan akun demo yang tersedia.');
+      return;
+    }
+
+    localStorage.setItem(
+      STORAGE_KEYS.currentUser,
+      JSON.stringify({
+        id: foundUser.id,
+        username: foundUser.username,
+        email: foundUser.email,
+        avatar: foundUser.avatar,
+      }),
+    );
+
+    setError('');
     navigate('/chat');
+  };
+
+  const fillDemoAccount = () => {
+    setEmail('satoshi@bitcoin.org');
+    setPassword('12345678');
+    setError('');
   };
 
   return (
@@ -42,6 +69,19 @@ export default function Login() {
           <p className="text-gray-500 dark:text-gray-400 text-center text-sm mb-8">
             Access your secure, decentralized chats.
           </p>
+
+          <div className="mb-6 p-3 rounded-xl border border-primary-200 dark:border-primary-800 bg-primary-50/70 dark:bg-primary-900/20">
+            <p className="text-xs text-primary-700 dark:text-primary-300 font-medium">
+              Demo account: satoshi@bitcoin.org / 12345678
+            </p>
+            <button
+              type="button"
+              onClick={fillDemoAccount}
+              className="mt-2 text-xs font-semibold text-primary-600 dark:text-primary-400 hover:underline"
+            >
+              Isi otomatis akun demo
+            </button>
+          </div>
 
           <form onSubmit={handleSubmit} className="space-y-5">
             {/* Email Field */}
@@ -100,6 +140,10 @@ export default function Login() {
               <ArrowRight className="w-4 h-4" />
             </button>
           </form>
+
+          {error && (
+            <p className="mt-4 text-sm text-red-600 dark:text-red-400 text-center">{error}</p>
+          )}
 
           {/* Divider */}
           <div className="mt-8 flex items-center gap-4">

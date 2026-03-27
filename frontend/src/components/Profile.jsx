@@ -1,9 +1,23 @@
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowLeft, User, Mail, Shield, Key, Edit2 } from 'lucide-react';
+import { STORAGE_KEYS } from '../data/mockData';
 
 export default function Profile() {
   const [isEditing, setIsEditing] = useState(false);
+  const [profileData, setProfileData] = useState(() => {
+    const currentUser = JSON.parse(localStorage.getItem(STORAGE_KEYS.currentUser) || 'null');
+    return {
+      username: currentUser?.username || 'satoshi_nakamoto',
+      email: currentUser?.email || 'satoshi@bitcoin.org',
+      avatar: currentUser?.avatar || 'https://api.dicebear.com/7.x/avataaars/svg?seed=MyUserAvatar',
+    };
+  });
+
+  const handleSave = () => {
+    setIsEditing(false);
+    localStorage.setItem(STORAGE_KEYS.currentUser, JSON.stringify(profileData));
+  };
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900 py-12 px-4 sm:px-6 lg:px-8">
@@ -18,7 +32,13 @@ export default function Profile() {
             <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Profile</h1>
           </div>
           <button 
-            onClick={() => setIsEditing(!isEditing)}
+            onClick={() => {
+              if (isEditing) {
+                handleSave();
+              } else {
+                setIsEditing(true);
+              }
+            }}
             className="flex items-center gap-2 px-4 py-2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors shadow-sm text-sm font-medium text-gray-700 dark:text-gray-200"
           >
             <Edit2 className="w-4 h-4" />
@@ -34,7 +54,7 @@ export default function Profile() {
             <div className="absolute -bottom-16 left-8">
               <div className="relative">
                 <img 
-                  src="https://api.dicebear.com/7.x/avataaars/svg?seed=MyUserAvatar" 
+                  src={profileData.avatar}
                   alt="Avatar" 
                   className="w-32 h-32 rounded-full border-4 border-white dark:border-gray-800 bg-white dark:bg-gray-800 object-cover"
                 />
@@ -62,11 +82,12 @@ export default function Profile() {
                   {isEditing ? (
                     <input 
                       type="text" 
-                      defaultValue="satoshi_nakamoto" 
+                      value={profileData.username}
+                      onChange={(e) => setProfileData((prev) => ({ ...prev, username: e.target.value }))}
                       className="flex-1 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-2 focus:ring-2 focus:ring-primary-500 focus:outline-none dark:text-white"
                     />
                   ) : (
-                    <span className="text-lg font-semibold text-gray-900 dark:text-white">satoshi_nakamoto</span>
+                    <span className="text-lg font-semibold text-gray-900 dark:text-white">{profileData.username}</span>
                   )}
                 </div>
               </div>
@@ -83,11 +104,12 @@ export default function Profile() {
                   {isEditing ? (
                     <input 
                       type="email" 
-                      defaultValue="satoshi@bitcoin.org" 
+                      value={profileData.email}
+                      onChange={(e) => setProfileData((prev) => ({ ...prev, email: e.target.value }))}
                       className="flex-1 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl px-4 py-2 focus:ring-2 focus:ring-primary-500 focus:outline-none dark:text-white"
                     />
                   ) : (
-                    <span className="text-lg font-medium text-gray-900 dark:text-white">satoshi@bitcoin.org</span>
+                    <span className="text-lg font-medium text-gray-900 dark:text-white">{profileData.email}</span>
                   )}
                 </div>
               </div>

@@ -1,16 +1,55 @@
 import React, { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Mail, Lock, User, ArrowRight, ShieldCheck } from 'lucide-react';
+import { STORAGE_KEYS, getStoredUsers, saveStoredUsers } from '../data/mockData';
 
 export default function Register() {
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const navigate = useNavigate();
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    console.log("Register submitted:", { username, email, password });
-    // TODO: Integrate backend REST API here
+
+    if (password.length < 8) {
+      setError('Password minimal 8 karakter.');
+      return;
+    }
+
+    const users = getStoredUsers();
+    const alreadyExists = users.some(
+      (user) => user.email.toLowerCase() === email.toLowerCase(),
+    );
+
+    if (alreadyExists) {
+      setError('Email sudah terdaftar. Coba login.');
+      return;
+    }
+
+    const newUser = {
+      id: `u${Date.now()}`,
+      username,
+      email,
+      password,
+      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(username)}`,
+    };
+
+    const updatedUsers = [...users, newUser];
+    saveStoredUsers(updatedUsers);
+    localStorage.setItem(
+      STORAGE_KEYS.currentUser,
+      JSON.stringify({
+        id: newUser.id,
+        username: newUser.username,
+        email: newUser.email,
+        avatar: newUser.avatar,
+      }),
+    );
+
+    setError('');
+    navigate('/chat');
   };
 
   return (
@@ -121,6 +160,10 @@ export default function Register() {
               <ArrowRight className="w-4 h-4" />
             </button>
           </form>
+
+          {error && (
+            <p className="mt-4 text-sm text-red-600 dark:text-red-400 text-center">{error}</p>
+          )}
 
         </div>
 

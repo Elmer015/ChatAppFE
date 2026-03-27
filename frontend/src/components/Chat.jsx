@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { 
   Search, 
@@ -8,39 +8,139 @@ import {
   Send,
   Check,
   CheckCheck,
+  Lock,
   ArrowLeft,
   Settings
 } from 'lucide-react';
+import { DUMMY_CHATS, DUMMY_MESSAGES_BY_CHAT, STORAGE_KEYS } from '../data/mockData';
+import { decryptMessage, encryptMessage, getRoomSecret } from '../utils/cryptoChat';
 
-const INITIAL_CHATS = [
-  { id: 1, name: 'Satoshi Nakamoto', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Satoshi', lastMessage: 'The block is mined successfully.', time: '10:42 AM', unread: 2, isOnline: true },
-  { id: 2, name: 'Vitalik Buterin', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Vitalik', lastMessage: 'Let\'s talk about the new smart contract.', time: 'Yesterday', unread: 0, isOnline: false },
-  { id: 3, name: 'Hal Finney', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Hal', lastMessage: 'Running bitcoin', time: 'Yesterday', unread: 0, isOnline: false },
-  { id: 4, name: 'Ada Lovelace', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Ada', lastMessage: 'I reviewed your algorithm.', time: 'Tuesday', unread: 5, isOnline: true },
-  { id: 5, name: 'BlockChat Team', avatar: 'https://api.dicebear.com/7.x/identicon/svg?seed=BlockChat', lastMessage: 'Welcome to the decentralized chat network!', time: 'Monday', unread: 0, isOnline: true },
-];
+const CHAT_MESSAGES_STORAGE_KEY = 'blockchat_messages_by_chat';
+const FAILED_DECRYPT_TEXT = '[Pesan terenkripsi gagal dibuka]';
 
-const DUMMY_MESSAGES = [
-  { id: 1, senderId: 2, text: 'Hey! Did you check the latest transaction?', time: '10:30 AM', isMe: false, status: 'read' },
-  { id: 2, senderId: 'me', text: 'Yes, it went through perfectly. The encryption works like a charm.', time: '10:32 AM', isMe: true, status: 'read' },
-  { id: 3, senderId: 2, text: 'Awesome! Web3 messaging is definitely the future.', time: '10:33 AM', isMe: false, status: 'read' },
-  { id: 4, senderId: 'me', text: 'Agreed. Next step is to implement the IPFS sync.', time: '10:40 AM', isMe: true, status: 'sent' },
-];
+function loadMessagesByChat() {
+  const stored = localStorage.getItem(CHAT_MESSAGES_STORAGE_KEY);
+  if (!stored) return DUMMY_MESSAGES_BY_CHAT;
+
+  try {
+    return JSON.parse(stored);
+  } catch (error) {
+    return DUMMY_MESSAGES_BY_CHAT;
+  }
+}
+
+function getFormattedTime() {
+  return new Date().toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
 
 export default function Chat() {
-  const [chats, setChats] = useState(INITIAL_CHATS);
-  const [activeChat, setActiveChat] = useState(null);
+  const [chats, setChats] = useState(DUMMY_CHATS);
+  const [activeChat, setActiveChat] = useState(DUMMY_CHATS[0]);
   const [searchQuery, setSearchQuery] = useState('');
   const [newMessage, setNewMessage] = useState('');
   const [isMobileListVisible, setIsMobileListVisible] = useState(true);
+  const [messagesByChat, setMessagesByChat] = useState(loadMessagesByChat);
+  const [decryptedMessages, setDecryptedMessages] = useState({});
 
-  // In a real app, you would load messages dynamically based on activeChat.id
-  const messages = activeChat ? DUMMY_MESSAGES : []; 
+  const currentUser = JSON.parse(localStorage.getItem(STORAGE_KEYS.currentUser) || 'null');
 
-  const handleSendMessage = (e) => {
+  const messages = activeChat ? messagesByChat[activeChat.id] || [] : [];
+  const roomSecret = activeChat
+    ? getRoomSecret(activeChat.id, currentUser?.id || 'guest')
+    : getRoomSecret('default', currentUser?.id || 'guest');
+  const filteredChats = chats.filter((chat) =>
+    chat.name.toLowerCase().includes(searchQuery.toLowerCase().trim()),
+  );
+
+  useEffect(() => {
+    localStorage.setItem(CHAT_MESSAGES_STORAGE_KEY, JSON.stringify(messagesByChat));
+  }, [messagesByChat]);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    const decryptUnreadMessages = async () => {
+      const updates = {};
+
+      for (const msg of messages) {
+        const canDecrypt = msg.encrypted && msg.payload && !decryptedMessages[msg.id];
+        if (!canDecrypt) continue;
+
+        try {
+          updates[msg.id] = await decryptMessage(msg.payload, roomSecret);
+        } catch (error) {
+          updates[msg.id] = FAILED_DECRYPT_TEXT;
+        }
+      }
+
+      if (!isCancelled && Object.keys(updates).length > 0) {
+        setDecryptedMessages((prev) => ({ ...prev, ...updates }));
+      }
+    };
+
+    decryptUnreadMessages();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [messages, decryptedMessages, roomSecret]);
+
+  const handleSendMessage = async (e) => {
     e.preventDefault();
     if (!newMessage.trim()) return;
-    console.log("Sending message:", newMessage);
+
+    const now = getFormattedTime();
+    const trimmedMessage = newMessage.trim();
+    const messageId = Date.now();
+
+    let outgoingMessage;
+
+    try {
+      const encryptedPayload = await encryptMessage(trimmedMessage, roomSecret);
+      outgoingMessage = {
+        id: messageId,
+        senderId: 'me',
+        encrypted: true,
+        payload: encryptedPayload,
+        encryptionStatus: 'encrypted',
+        time: now,
+        isMe: true,
+        status: 'sent',
+      };
+      setDecryptedMessages((prev) => ({ ...prev, [messageId]: trimmedMessage }));
+    } catch (error) {
+      outgoingMessage = {
+        id: messageId,
+        senderId: 'me',
+        text: trimmedMessage,
+        encrypted: false,
+        encryptionStatus: 'plain-fallback',
+        time: now,
+        isMe: true,
+        status: 'sent',
+      };
+    }
+
+    setMessagesByChat((prev) => ({
+      ...prev,
+      [activeChat.id]: [...(prev[activeChat.id] || []), outgoingMessage],
+    }));
+
+    setChats((prevChats) =>
+      prevChats.map((chat) =>
+        chat.id === activeChat.id
+          ? {
+            ...chat,
+            lastMessage: outgoingMessage.encrypted ? 'Pesan terenkripsi' : outgoingMessage.text,
+            time: now,
+          }
+          : chat,
+      ),
+    );
+
     setNewMessage('');
   };
 
@@ -62,8 +162,8 @@ export default function Chat() {
         {/* Sidebar Header */}
         <div className="flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-800/50 border-b border-gray-200 dark:border-gray-800 h-16 shrink-0">
           <Link to="/profile" className="flex items-center gap-3 cursor-pointer group">
-            <img src="https://api.dicebear.com/7.x/avataaars/svg?seed=MyUserAvatar" alt="My Profile" className="w-10 h-10 rounded-full bg-gray-200 dark:bg-gray-700 object-cover border border-gray-300 dark:border-gray-600 group-hover:ring-2 group-hover:ring-primary-500 transition-all" />
-            <span className="font-semibold text-gray-900 dark:text-white hidden lg:block group-hover:text-primary-600 transition-colors">My Account</span>
+            <img src={currentUser?.avatar || 'https://api.dicebear.com/7.x/avataaars/svg?seed=MyUserAvatar'} alt="My Profile" className="w-10 h-10 rounded-full bg-gray-200 dark:bg-gray-700 object-cover border border-gray-300 dark:border-gray-600 group-hover:ring-2 group-hover:ring-primary-500 transition-all" />
+            <span className="font-semibold text-gray-900 dark:text-white hidden lg:block group-hover:text-primary-600 transition-colors">{currentUser?.username || 'My Account'}</span>
           </Link>
           <div className="flex items-center gap-3 text-gray-500 dark:text-gray-400">
             <button className="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors" title="New Chat">
@@ -93,7 +193,7 @@ export default function Chat() {
 
         {/* Chat List */}
         <div className="flex-1 overflow-y-auto custom-scrollbar">
-          {chats.map((chat) => (
+          {filteredChats.map((chat) => (
             <div 
               key={chat.id}
               onClick={() => selectChat(chat)}
@@ -125,6 +225,12 @@ export default function Chat() {
               </div>
             </div>
           ))}
+
+          {filteredChats.length === 0 && (
+            <div className="p-6 text-center text-sm text-gray-500 dark:text-gray-400">
+              Tidak ada chat yang cocok dengan pencarian.
+            </div>
+          )}
         </div>
       </div>
 
@@ -182,7 +288,19 @@ export default function Chat() {
                         : 'bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 border border-gray-100 dark:border-gray-700 rounded-tl-sm'
                       }`}
                   >
-                    <p className="text-sm leading-relaxed whitespace-pre-wrap">{msg.text}</p>
+                    <p className="text-sm leading-relaxed whitespace-pre-wrap">
+                      {msg.encrypted
+                        ? (decryptedMessages[msg.id] || 'Membuka pesan terenkripsi...')
+                        : msg.text}
+                    </p>
+                    <div className={`mt-1.5 flex items-center gap-1 text-[10px] ${msg.isMe ? 'text-primary-100/90' : 'text-gray-400'}`}>
+                      <Lock className="w-3 h-3" />
+                      <span>
+                        {msg.encrypted
+                          ? (decryptedMessages[msg.id] === FAILED_DECRYPT_TEXT ? 'Decrypt gagal' : 'Encrypted')
+                          : (msg.encryptionStatus === 'plain-fallback' ? 'Tanpa enkripsi (fallback)' : 'Plain')}
+                      </span>
+                    </div>
                     <div className={`flex items-center justify-end gap-1 mt-1 ${msg.isMe ? 'text-primary-100' : 'text-gray-400'} text-[10px]`}>
                       <span>{msg.time}</span>
                       {msg.isMe && (
