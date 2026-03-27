@@ -6,7 +6,6 @@ import {
   MessageSquarePlus, 
   Users,
   UserPlus,
-  Smile, 
   Send,
   Check,
   CheckCheck,
@@ -19,6 +18,15 @@ import { STORAGE_KEYS, getStoredChatState, getStoredUsers, saveStoredChatState }
 import { decryptMessage, encryptMessage, getRoomSecret } from '../utils/cryptoChat';
 
 const FAILED_DECRYPT_TEXT = '[Pesan terenkripsi gagal dibuka]';
+const EMOJI_REGEX = /[\p{Extended_Pictographic}\uFE0F]/u;
+
+function containsEmoji(text) {
+  return EMOJI_REGEX.test(text);
+}
+
+function stripEmoji(text) {
+  return text.replace(/[\p{Extended_Pictographic}\uFE0F]/gu, '');
+}
 
 function createUuid() {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) {
@@ -60,6 +68,7 @@ export default function Chat() {
   const [allUsers] = useState(getStoredUsers);
   const [searchQuery, setSearchQuery] = useState('');
   const [newMessage, setNewMessage] = useState('');
+  const [messageError, setMessageError] = useState('');
   const [isMobileListVisible, setIsMobileListVisible] = useState(true);
   const [decryptedMessages, setDecryptedMessages] = useState({});
   const [isCreateGroupModalOpen, setIsCreateGroupModalOpen] = useState(false);
@@ -307,6 +316,11 @@ export default function Chat() {
     e.preventDefault();
     if (!newMessage.trim() || !activeChat || !currentUserId) return;
 
+    if (containsEmoji(newMessage)) {
+      setMessageError('Chat hanya mendukung teks tanpa emoji.');
+      return;
+    }
+
     const nowIso = new Date().toISOString();
     const trimmedMessage = newMessage.trim();
     const messageId = createUuid();
@@ -343,12 +357,14 @@ export default function Chat() {
     }));
 
     setNewMessage('');
+    setMessageError('');
   };
 
   const selectChat = (chat) => {
     setActiveChatId(chat.id);
     setIsMobileListVisible(false);
     markChatAsRead(chat.id);
+    setMessageError('');
   };
 
   const openGroupDetail = (chatId) => {
@@ -648,16 +664,22 @@ export default function Chat() {
             {/* Input Area (Text Only) */}
             <div className="relative z-10 p-3 bg-[#efebfb] border-t border-[#d8cfee] shrink-0">
               <form onSubmit={handleSendMessage} className="flex items-end gap-2 max-w-5xl mx-auto">
-                <button type="button" className="p-2.5 text-[#75669e] hover:bg-[#e0d7f2] rounded-full transition-colors flex-shrink-0">
-                  <Smile className="w-6 h-6" />
-                </button>
-                
                 <div className="flex-1 bg-[#f6f3ff] border border-[#d8cfee] rounded-2xl flex items-center overflow-hidden focus-within:ring-2 focus-within:ring-[#b7d62e]/60 focus-within:border-[#b7d62e] transition-all shadow-sm">
                   <textarea
                     rows={1}
                     placeholder="Type a message..."
                     value={newMessage}
-                    onChange={(e) => setNewMessage(e.target.value)}
+                    onChange={(e) => {
+                      const nextValue = e.target.value;
+                      if (containsEmoji(nextValue)) {
+                        setNewMessage(stripEmoji(nextValue));
+                        setMessageError('Emoji tidak diizinkan. Gunakan teks saja.');
+                        return;
+                      }
+
+                      setNewMessage(nextValue);
+                      setMessageError('');
+                    }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
@@ -681,6 +703,9 @@ export default function Chat() {
                   <Send className={`w-5 h-5 ${newMessage.trim() ? 'ml-0.5' : ''}`} />
                 </button>
               </form>
+              {messageError && (
+                <p className="max-w-5xl mx-auto mt-2 text-xs text-red-600 px-1">{messageError}</p>
+              )}
             </div>
           </>
         ) : (

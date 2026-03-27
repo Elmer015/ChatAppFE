@@ -6,6 +6,7 @@ import Register from './components/Register';
 import Chat from './components/Chat';
 import Profile from './components/Profile';
 import Settings from './components/Settings';
+import EncryptionPreview from './components/EncryptionPreview';
 
 export default function App() {
   return (
@@ -17,6 +18,7 @@ export default function App() {
         <Route path="/chat" element={<Chat />} />
         <Route path="/profile" element={<Profile />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/temp-encryption" element={<EncryptionPreview />} />
       </Routes>
     </BrowserRouter>
   );
