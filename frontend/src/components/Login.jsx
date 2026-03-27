@@ -28,6 +28,7 @@ export default function Login() {
         username: foundUser.username,
         email: foundUser.email,
         avatar: foundUser.avatar,
+        password: foundUser.password,
       }),
     );
 
