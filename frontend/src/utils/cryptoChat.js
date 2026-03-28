@@ -6,7 +6,8 @@ const PBKDF2_ITERATIONS = 100000;
 const SHARED_SECRET = 'blockchat-demo-shared-secret';
 
 export function getRoomSecret(chatId, userId = 'guest') {
-  return `${SHARED_SECRET}::room:${chatId}::user:${userId}`;
+  // Semua peserta di room yang sama harus memakai secret yang sama agar saling bisa decrypt.
+  return `${SHARED_SECRET}::room:${chatId}`;
 }
 
 function toBase64(bytes) {

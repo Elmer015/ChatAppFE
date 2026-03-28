@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { 
   Search, 
@@ -19,11 +19,19 @@ import { decryptMessage, encryptMessage, getRoomSecret } from '../utils/cryptoCh
 import {
   addGroupMembers,
   clearSession,
+  createPrivateChat,
   createGroupChat,
+  getChatMessages,
   getChatDetail,
   getMyChats,
+  leaveGroup,
+  removeGroupMembers,
+  searchUsersByUsername,
   sendChatMessage,
+  updateGroup,
+  updateGroupMemberRoles,
 } from '../services/api';
+import { createChatSocketClient, sendMessageViaSocket, subscribeChatTopic } from '../services/chatSocket';
 
 const FAILED_DECRYPT_TEXT = '[Pesan terenkripsi gagal dibuka]';
 const EMOJI_REGEX = /[\p{Extended_Pictographic}\uFE0F]/u;
@@ -44,15 +52,49 @@ function createUuid() {
   return `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function parseChatDate(value) {
+  if (!value) return new Date();
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? new Date() : value;
+  }
+
+  if (typeof value === 'number') {
+    const fromNumber = new Date(value);
+    return Number.isNaN(fromNumber.getTime()) ? new Date() : fromNumber;
+  }
+
+  const raw = String(value).trim();
+  if (!raw) return new Date();
+
+  const timeOnlyMatch = raw.match(/^(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (timeOnlyMatch) {
+    const now = new Date();
+    const hour = Number(timeOnlyMatch[1]);
+    const minute = Number(timeOnlyMatch[2]);
+    const second = Number(timeOnlyMatch[3] || '0');
+
+    if (hour <= 23 && minute <= 59 && second <= 59) {
+      const withToday = new Date(now);
+      withToday.setHours(hour, minute, second, 0);
+      return withToday;
+    }
+  }
+
+  const normalized = raw.includes('T') ? raw : raw.replace(' ', 'T');
+  const parsed = new Date(normalized);
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
 function formatClock(isoDate) {
-  return new Date(isoDate).toLocaleTimeString([], {
+  return parseChatDate(isoDate).toLocaleTimeString([], {
     hour: '2-digit',
     minute: '2-digit',
   });
 }
 
 function formatListTime(isoDate) {
-  const date = new Date(isoDate);
+  const date = parseChatDate(isoDate);
   const now = new Date();
   const isToday =
     date.getDate() === now.getDate()
@@ -65,10 +107,30 @@ function formatListTime(isoDate) {
 }
 
 function formatDateTime(isoDate) {
-  return new Date(isoDate).toLocaleString([], {
+  return parseChatDate(isoDate).toLocaleString([], {
     dateStyle: 'medium',
     timeStyle: 'short',
   });
+}
+
+function normalizeApiMessage(messageResponse, { chatId, currentUserId, currentUsername, usersById, membersByUsername }) {
+  const senderName = messageResponse?.sender || '';
+  const senderIdByMember = membersByUsername[senderName];
+  const senderIdByUser = Object.values(usersById).find((user) => user.username === senderName)?.id;
+
+  const senderId = senderName === currentUsername
+    ? currentUserId
+    : (senderIdByMember || senderIdByUser || senderName || currentUserId);
+
+  return {
+    id: messageResponse?.id || createUuid(),
+    chat_id: chatId,
+    sender_id: senderId,
+    content: messageResponse?.content || '',
+    iv: messageResponse?.iv ?? null,
+    type: messageResponse?.type || 'TEXT',
+    created_at: messageResponse?.time || new Date().toISOString(),
+  };
 }
 
 export default function Chat() {
@@ -82,16 +144,64 @@ export default function Chat() {
   const [isMobileListVisible, setIsMobileListVisible] = useState(true);
   const [decryptedMessages, setDecryptedMessages] = useState({});
   const [isCreateGroupModalOpen, setIsCreateGroupModalOpen] = useState(false);
+  const [isCreatePrivateModalOpen, setIsCreatePrivateModalOpen] = useState(false);
+  const [selectedPrivateUserId, setSelectedPrivateUserId] = useState('');
+  const [privateSearchQuery, setPrivateSearchQuery] = useState('');
+  const [privateSearchResults, setPrivateSearchResults] = useState([]);
+  const [isSearchingPrivateUsers, setIsSearchingPrivateUsers] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [newGroupMembers, setNewGroupMembers] = useState([]);
   const [isAddMemberModalOpen, setIsAddMemberModalOpen] = useState(false);
   const [membersToAdd, setMembersToAdd] = useState([]);
   const [isGroupDetailModalOpen, setIsGroupDetailModalOpen] = useState(false);
   const [groupDetailChatId, setGroupDetailChatId] = useState('');
+  const [editedGroupName, setEditedGroupName] = useState('');
+  const [isSocketConnected, setIsSocketConnected] = useState(false);
+
+  const socketClientRef = useRef(null);
+  const socketSubscriptionsRef = useRef({});
+  const allUsersRef = useRef([]);
 
   const currentUser = JSON.parse(localStorage.getItem(STORAGE_KEYS.currentUser) || 'null');
   const currentUserId = currentUser?.id || '';
+  const currentUsername = currentUser?.username || '';
   const navigate = useNavigate();
+
+  const upsertIncomingMessage = (chatId, messageResponse) => {
+    setChatState((prev) => {
+      const participants = prev.chatParticipants.filter((participant) => participant.chat_id === chatId);
+      const membersByUsername = {};
+
+      for (const participant of participants) {
+        const user = allUsersRef.current.find((row) => row.id === participant.user_id);
+        if (user?.username) {
+          membersByUsername[user.username] = participant.user_id;
+        }
+      }
+
+      const usersById = {};
+      for (const user of allUsersRef.current) {
+        usersById[user.id] = user;
+      }
+
+      const incomingMessage = normalizeApiMessage(messageResponse, {
+        chatId,
+        currentUserId,
+        currentUsername,
+        usersById,
+        membersByUsername,
+      });
+
+      if (prev.messages.some((message) => message.id === incomingMessage.id)) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        messages: [...prev.messages, incomingMessage],
+      };
+    });
+  };
 
   const loadChatsFromApi = async () => {
     const token = localStorage.getItem(STORAGE_KEYS.authToken);
@@ -119,17 +229,33 @@ export default function Chat() {
 
       const chatParticipants = [];
       const normalizedChats = [];
+      const normalizedMessages = [];
 
-      for (const chat of chats || []) {
-        const detail = await getChatDetail(chat.id);
+      const chatBundles = await Promise.all((chats || []).map(async (chat) => {
+        const [detail, messages] = await Promise.all([
+          getChatDetail(chat.id),
+          getChatMessages(chat.id),
+        ]);
+
+        return {
+          chat,
+          detail,
+          messages,
+        };
+      }));
+
+      for (const bundle of chatBundles) {
+        const { chat, detail, messages } = bundle;
 
         normalizedChats.push({
           id: chat.id,
           type: chat.type,
           name: chat.name,
           created_by: detail?.createdBy || currentUser?.username || 'System',
-          created_at: chat.createdAt || new Date().toISOString(),
+          created_at: chat.createdAt || detail?.createdAt || new Date().toISOString(),
         });
+
+        const membersByUsername = {};
 
         for (const member of detail?.members || []) {
           chatParticipants.push({
@@ -140,6 +266,8 @@ export default function Chat() {
             joined_at: member.joinedAt || new Date().toISOString(),
           });
 
+          membersByUsername[member.username] = member.id;
+
           usersById[member.id] = {
             id: member.id,
             username: member.username,
@@ -147,15 +275,26 @@ export default function Chat() {
             avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(member.username || member.id)}`,
           };
         }
+
+        for (const messageRow of messages || []) {
+          normalizedMessages.push(normalizeApiMessage(messageRow, {
+            chatId: chat.id,
+            currentUserId,
+            currentUsername,
+            usersById,
+            membersByUsername,
+          }));
+        }
       }
 
-      setAllUsers(Object.values(usersById));
-      saveStoredUsers(Object.values(usersById));
+      const users = Object.values(usersById);
+      setAllUsers(users);
+      saveStoredUsers(users);
 
       setChatState((prev) => ({
         chats: normalizedChats,
         chatParticipants,
-        messages: (prev.messages || []).filter((message) => normalizedChats.some((chat) => chat.id === message.chat_id)),
+        messages: normalizedMessages,
         readReceipts: prev.readReceipts || [],
       }));
     } catch (error) {
@@ -174,6 +313,47 @@ export default function Chat() {
   useEffect(() => {
     loadChatsFromApi();
   }, []);
+
+  useEffect(() => {
+    allUsersRef.current = allUsers;
+  }, [allUsers]);
+
+  useEffect(() => {
+    const token = localStorage.getItem(STORAGE_KEYS.authToken);
+    if (!token || !currentUserId) return undefined;
+
+    const client = createChatSocketClient({
+      onConnect: () => {
+        setIsSocketConnected(true);
+        setApiError('');
+      },
+      onDisconnect: () => {
+        setIsSocketConnected(false);
+      },
+      onError: (socketError) => {
+        setIsSocketConnected(false);
+        setApiError(socketError || 'Koneksi realtime terputus. Fallback ke REST tetap aktif.');
+      },
+    });
+
+    socketClientRef.current = client;
+    client.activate();
+
+    return () => {
+      const subscriptions = socketSubscriptionsRef.current;
+      Object.values(subscriptions).forEach((subscription) => {
+        subscription?.unsubscribe?.();
+      });
+      socketSubscriptionsRef.current = {};
+
+      if (client.active) {
+        client.deactivate();
+      }
+
+      socketClientRef.current = null;
+      setIsSocketConnected(false);
+    };
+  }, [currentUserId]);
 
   const participantsByChat = useMemo(() => {
     const map = {};
@@ -199,7 +379,7 @@ export default function Chat() {
     }
 
     Object.keys(map).forEach((chatId) => {
-      map[chatId].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+      map[chatId].sort((a, b) => parseChatDate(a.created_at) - parseChatDate(b.created_at));
     });
 
     return map;
@@ -294,7 +474,7 @@ export default function Chat() {
       });
     }
 
-    rows.sort((a, b) => new Date(b.latestMessageCreatedAt) - new Date(a.latestMessageCreatedAt));
+    rows.sort((a, b) => parseChatDate(b.latestMessageCreatedAt) - parseChatDate(a.latestMessageCreatedAt));
 
     return rows;
   }, [
@@ -310,6 +490,28 @@ export default function Chat() {
   const [activeChatId, setActiveChatId] = useState('');
 
   useEffect(() => {
+    if (!isSocketConnected || !socketClientRef.current) return;
+
+    const activeChatIds = new Set(chatState.chats.map((chat) => chat.id));
+    const subscriptions = socketSubscriptionsRef.current;
+
+    Object.keys(subscriptions).forEach((chatId) => {
+      if (!activeChatIds.has(chatId)) {
+        subscriptions[chatId]?.unsubscribe?.();
+        delete subscriptions[chatId];
+      }
+    });
+
+    for (const chat of chatState.chats) {
+      if (subscriptions[chat.id]) continue;
+
+      subscriptions[chat.id] = subscribeChatTopic(socketClientRef.current, chat.id, (incoming) => {
+        upsertIncomingMessage(chat.id, incoming);
+      });
+    }
+  }, [chatState.chats, isSocketConnected]);
+
+  useEffect(() => {
     if (activeChatId) {
       const stillExists = chatList.some((chat) => chat.id === activeChatId);
       if (stillExists) return;
@@ -322,8 +524,8 @@ export default function Chat() {
   const messages = activeChat ? messagesByChat[activeChat.id] || [] : [];
 
   const roomSecret = activeChat
-    ? getRoomSecret(activeChat.id, currentUser?.id || 'guest')
-    : getRoomSecret('default', currentUser?.id || 'guest');
+    ? getRoomSecret(activeChat.id)
+    : getRoomSecret('default');
   const filteredChats = chatList.filter((chat) =>
     chat.title.toLowerCase().includes(searchQuery.toLowerCase().trim()),
   );
@@ -333,9 +535,27 @@ export default function Chat() {
 
   const groupDetailChat = chatList.find((chat) => chat.id === groupDetailChatId && chat.type === 'GROUP') || null;
   const groupDetailParticipants = groupDetailChat ? (participantsByChat[groupDetailChat.id] || []) : [];
+  const groupDetailCurrentUserRole = groupDetailParticipants.find((participant) => participant.user_id === currentUserId)?.role;
   const groupCreator = groupDetailChat ? userMap[groupDetailChat.created_by] : null;
 
   const contactsToCreateGroup = allUsers.filter((user) => user.id !== currentUserId);
+  const hasPrivateChatWithUser = (userId) => chatState.chats.some((chat) => {
+    if (chat.type !== 'PRIVATE') return false;
+    const members = participantsByChat[chat.id] || [];
+    return members.some((member) => member.user_id === userId) && members.some((member) => member.user_id === currentUserId);
+  });
+
+  const contactsForPrivateChat = allUsers.filter((user) => {
+    if (user.id === currentUserId) return false;
+
+    return !hasPrivateChatWithUser(user.id);
+  });
+
+  const privateChatCandidates = (privateSearchQuery.trim().length >= 2
+    ? privateSearchResults
+    : contactsForPrivateChat)
+    .filter((user) => user.id !== currentUserId && !hasPrivateChatWithUser(user.id));
+
   const addableUsers = activeChat
     ? allUsers.filter((user) => user.id !== currentUserId && !activeParticipants.some((p) => p.user_id === user.id))
     : [];
@@ -343,6 +563,60 @@ export default function Chat() {
   useEffect(() => {
     saveStoredChatState(chatState);
   }, [chatState]);
+
+  useEffect(() => {
+    if (!isCreatePrivateModalOpen) return undefined;
+
+    const keyword = privateSearchQuery.trim();
+    if (keyword.length < 2) {
+      setPrivateSearchResults([]);
+      setIsSearchingPrivateUsers(false);
+      return undefined;
+    }
+
+    let isCancelled = false;
+
+    const timeoutId = setTimeout(async () => {
+      setIsSearchingPrivateUsers(true);
+
+      try {
+        const users = await searchUsersByUsername(keyword);
+        if (isCancelled) return;
+
+        const normalized = (users || []).map((user) => ({
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(user.username || user.id)}`,
+        }));
+
+        setPrivateSearchResults(normalized);
+
+        setAllUsers((prev) => {
+          const map = {};
+          for (const row of [...prev, ...normalized]) {
+            map[row.id] = row;
+          }
+          const merged = Object.values(map);
+          saveStoredUsers(merged);
+          return merged;
+        });
+      } catch (error) {
+        if (!isCancelled) {
+          setApiError(error.message || 'Gagal mencari user.');
+        }
+      } finally {
+        if (!isCancelled) {
+          setIsSearchingPrivateUsers(false);
+        }
+      }
+    }, 350);
+
+    return () => {
+      isCancelled = true;
+      clearTimeout(timeoutId);
+    };
+  }, [isCreatePrivateModalOpen, privateSearchQuery]);
 
   const markChatAsRead = (chatId) => {
     const unreadIncoming = (messagesByChat[chatId] || []).filter((message) => {
@@ -442,30 +716,38 @@ export default function Chat() {
     }
 
     try {
-      const response = await sendChatMessage(activeChat.id, {
-        content: outgoingMessage.content,
-        iv: outgoingMessage.iv,
-        type: outgoingMessage.type,
-      });
+      if (isSocketConnected && socketClientRef.current?.connected) {
+        sendMessageViaSocket(socketClientRef.current, activeChat.id, {
+          content: outgoingMessage.content,
+          iv: outgoingMessage.iv,
+          type: outgoingMessage.type,
+        });
+      } else {
+        const response = await sendChatMessage(activeChat.id, {
+          content: outgoingMessage.content,
+          iv: outgoingMessage.iv,
+          type: outgoingMessage.type,
+        });
 
-      const senderId = response?.sender === currentUser?.username
-        ? currentUserId
-        : (allUsers.find((u) => u.username === response?.sender)?.id || response?.sender || currentUserId);
+        const senderId = response?.sender === currentUser?.username
+          ? currentUserId
+          : (allUsers.find((u) => u.username === response?.sender)?.id || response?.sender || currentUserId);
 
-      const persistedMessage = {
-        id: response?.id || messageId,
-        chat_id: activeChat.id,
-        sender_id: senderId,
-        content: response?.content || outgoingMessage.content,
-        iv: response?.iv ?? outgoingMessage.iv,
-        type: response?.type || 'TEXT',
-        created_at: response?.time || nowIso,
-      };
+        const persistedMessage = {
+          id: response?.id || messageId,
+          chat_id: activeChat.id,
+          sender_id: senderId,
+          content: response?.content || outgoingMessage.content,
+          iv: response?.iv ?? outgoingMessage.iv,
+          type: response?.type || 'TEXT',
+          created_at: response?.time || nowIso,
+        };
 
-      setChatState((prev) => ({
-        ...prev,
-        messages: [...prev.messages, persistedMessage],
-      }));
+        setChatState((prev) => ({
+          ...prev,
+          messages: [...prev.messages, persistedMessage],
+        }));
+      }
     } catch (error) {
       setMessageError(error.message || 'Gagal mengirim pesan ke server.');
       return;
@@ -484,6 +766,8 @@ export default function Chat() {
 
   const openGroupDetail = (chatId) => {
     setGroupDetailChatId(chatId);
+    const targetGroup = chatList.find((chat) => chat.id === chatId && chat.type === 'GROUP');
+    setEditedGroupName(targetGroup?.name || '');
     setIsGroupDetailModalOpen(true);
   };
 
@@ -510,6 +794,28 @@ export default function Chat() {
     }
   };
 
+  const handleCreatePrivateChat = async (e) => {
+    e.preventDefault();
+
+    if (!selectedPrivateUserId) return;
+
+    try {
+      const response = await createPrivateChat({ targetUserId: selectedPrivateUserId });
+
+      await loadChatsFromApi();
+
+      setSelectedPrivateUserId('');
+      setPrivateSearchQuery('');
+      setPrivateSearchResults([]);
+      setIsCreatePrivateModalOpen(false);
+      setActiveChatId(response?.id || '');
+      setIsMobileListVisible(false);
+      setApiError('');
+    } catch (error) {
+      setApiError(error.message || 'Gagal membuat private chat.');
+    }
+  };
+
   const handleAddMembersToGroup = async (e) => {
     e.preventDefault();
     if (!activeChat || activeChat.type !== 'GROUP' || membersToAdd.length === 0) return;
@@ -522,6 +828,58 @@ export default function Chat() {
       setApiError('');
     } catch (error) {
       setApiError(error.message || 'Gagal menambah anggota group.');
+    }
+  };
+
+  const handleRenameGroup = async () => {
+    if (!groupDetailChat || !editedGroupName.trim()) return;
+
+    try {
+      await updateGroup(groupDetailChat.id, { name: editedGroupName.trim() });
+      await loadChatsFromApi();
+      setApiError('');
+    } catch (error) {
+      setApiError(error.message || 'Gagal mengganti nama group.');
+    }
+  };
+
+  const handleChangeMemberRole = async (userId, role) => {
+    if (!groupDetailChat || !userId || !role) return;
+
+    try {
+      await updateGroupMemberRoles(groupDetailChat.id, {
+        updates: [{ userId, role }],
+      });
+      await loadChatsFromApi();
+      setApiError('');
+    } catch (error) {
+      setApiError(error.message || 'Gagal mengubah role member.');
+    }
+  };
+
+  const handleRemoveMember = async (userId) => {
+    if (!groupDetailChat || !userId) return;
+
+    try {
+      await removeGroupMembers(groupDetailChat.id, { userIds: [userId] });
+      await loadChatsFromApi();
+      setApiError('');
+    } catch (error) {
+      setApiError(error.message || 'Gagal menghapus anggota group.');
+    }
+  };
+
+  const handleLeaveActiveGroup = async () => {
+    if (!groupDetailChat) return;
+
+    try {
+      await leaveGroup(groupDetailChat.id);
+      await loadChatsFromApi();
+      setIsGroupDetailModalOpen(false);
+      setGroupDetailChatId('');
+      setApiError('');
+    } catch (error) {
+      setApiError(error.message || 'Gagal keluar dari group.');
     }
   };
 
@@ -559,6 +917,13 @@ export default function Chat() {
           </Link>
           <div className="flex items-center gap-3 text-[#75669e]">
             <button
+              onClick={() => setIsCreatePrivateModalOpen(true)}
+              className="p-2 rounded-full hover:bg-[#e0d7f2] transition-colors"
+              title="Create Private Chat"
+            >
+              <Users className="w-5 h-5" />
+            </button>
+            <button
               onClick={() => setIsCreateGroupModalOpen(true)}
               className="p-2 rounded-full hover:bg-[#e0d7f2] transition-colors"
               title="Create Group"
@@ -593,6 +958,10 @@ export default function Chat() {
           {apiError && (
             <p className="mt-2 text-xs text-red-600">{apiError}</p>
           )}
+
+          <p className={`mt-2 text-xs ${isSocketConnected ? 'text-green-700' : 'text-[#6f6195]'}`}>
+            {isSocketConnected ? 'Realtime connected' : 'Realtime disconnected (REST fallback)'}
+          </p>
         </div>
 
         {/* Chat List */}
@@ -828,6 +1197,83 @@ export default function Chat() {
         )}
       </div>
 
+      {isCreatePrivateModalOpen && (
+        <div className="absolute inset-0 z-30 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-lg rounded-2xl border border-[#d8cfee] bg-[#f6f3ff] shadow-2xl">
+            <div className="px-5 py-4 border-b border-[#e0d7f2] flex items-center justify-between">
+              <h3 className="text-lg font-bold text-[#23114b]">Buat Private Chat</h3>
+              <button
+                onClick={() => {
+                  setIsCreatePrivateModalOpen(false);
+                  setSelectedPrivateUserId('');
+                  setPrivateSearchQuery('');
+                  setPrivateSearchResults([]);
+                }}
+                className="p-2 rounded-full hover:bg-[#e8e1f9]"
+              >
+                <X className="w-4 h-4 text-[#6b5a97]" />
+              </button>
+            </div>
+
+            <form onSubmit={handleCreatePrivateChat} className="p-5 space-y-4">
+              <p className="text-sm text-[#67558f]">Cari username lalu pilih pengguna untuk memulai private chat.</p>
+
+              <div>
+                <input
+                  type="text"
+                  value={privateSearchQuery}
+                  onChange={(e) => setPrivateSearchQuery(e.target.value)}
+                  placeholder="Cari username (min. 2 karakter)"
+                  className="w-full px-3 py-2 rounded-xl border border-[#d8cfee] bg-white text-[#23114b] focus:outline-none focus:ring-2 focus:ring-[#b7d62e]"
+                />
+                {isSearchingPrivateUsers && (
+                  <p className="mt-2 text-xs text-[#7b6ba2]">Mencari user...</p>
+                )}
+              </div>
+
+              <div className="max-h-72 overflow-y-auto rounded-xl border border-[#ddd4f2] bg-white p-2 space-y-1">
+                {privateChatCandidates.length === 0 && (
+                  <p className="text-sm text-[#8a7db0] p-2">
+                    {privateSearchQuery.trim().length >= 2
+                      ? 'Username tidak ditemukan atau sudah ada private chat.'
+                      : 'Semua kontak yang tersedia sudah punya private chat.'}
+                  </p>
+                )}
+
+                {privateChatCandidates.map((user) => (
+                  <label key={user.id} className="flex items-center gap-3 p-2 rounded-lg hover:bg-[#f1ecff] cursor-pointer">
+                    <input
+                      type="radio"
+                      name="privateChatTarget"
+                      value={user.id}
+                      checked={selectedPrivateUserId === user.id}
+                      onChange={(e) => setSelectedPrivateUserId(e.target.value)}
+                    />
+                    <img src={user.avatar} alt={user.username} className="w-8 h-8 rounded-full bg-[#e5def7]" />
+                    <div className="min-w-0">
+                      <p className="text-sm text-[#23114b] truncate">{user.username}</p>
+                      <p className="text-[11px] text-[#8a7db0] truncate">{user.email || 'Tanpa email'}</p>
+                    </div>
+                  </label>
+                ))}
+              </div>
+
+              <button
+                type="submit"
+                disabled={!selectedPrivateUserId}
+                className={`w-full py-2.5 rounded-xl font-semibold transition-colors ${
+                  selectedPrivateUserId
+                    ? 'bg-[#b7d62e] text-[#23114b] hover:bg-[#a9c629]'
+                    : 'bg-[#ddd4f2] text-[#9f93bf]'
+                }`}
+              >
+                Mulai Private Chat
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+
       {isCreateGroupModalOpen && (
         <div className="absolute inset-0 z-30 bg-black/30 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-lg rounded-2xl border border-[#d8cfee] bg-[#f6f3ff] shadow-2xl">
@@ -970,6 +1416,7 @@ export default function Chat() {
                 onClick={() => {
                   setIsGroupDetailModalOpen(false);
                   setGroupDetailChatId('');
+                  setEditedGroupName('');
                 }}
                 className="p-2 rounded-full hover:bg-[#e8e1f9]"
               >
@@ -1002,6 +1449,32 @@ export default function Chat() {
                 </p>
               </div>
 
+              {groupDetailCurrentUserRole === 'ADMIN' && (
+                <div className="rounded-xl border border-[#ddd4f2] bg-white p-3 space-y-2">
+                  <p className="text-sm font-semibold text-[#67558f]">Ubah Nama Group</p>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={editedGroupName}
+                      onChange={(e) => setEditedGroupName(e.target.value)}
+                      className="flex-1 px-3 py-2 rounded-lg border border-[#d8cfee] bg-[#fdfcff] text-[#23114b] focus:outline-none focus:ring-2 focus:ring-[#b7d62e]"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleRenameGroup}
+                      disabled={!editedGroupName.trim()}
+                      className={`px-3 py-2 rounded-lg text-sm font-semibold ${
+                        editedGroupName.trim()
+                          ? 'bg-[#b7d62e] text-[#23114b] hover:bg-[#a9c629]'
+                          : 'bg-[#ddd4f2] text-[#9f93bf]'
+                      }`}
+                    >
+                      Simpan
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div>
                 <p className="text-sm font-semibold text-[#67558f] mb-2">Member Group</p>
                 <div className="max-h-64 overflow-y-auto rounded-xl border border-[#ddd4f2] bg-white p-2 space-y-1">
@@ -1020,14 +1493,45 @@ export default function Chat() {
                             <p className="text-[11px] text-[#8a7db0]">Gabung: {formatDateTime(participant.joined_at)}</p>
                           </div>
                         </div>
-                        <span className={`text-[11px] px-2 py-1 rounded-full font-semibold ${participant.role === 'ADMIN' ? 'bg-[#d9f0a5] text-[#40520b]' : 'bg-[#ece6ff] text-[#5e4f88]'}`}>
-                          {participant.role}
-                        </span>
+                        <div className="flex items-center gap-2">
+                          {groupDetailCurrentUserRole === 'ADMIN' && participant.user_id !== currentUserId ? (
+                            <select
+                              value={participant.role}
+                              onChange={(e) => handleChangeMemberRole(participant.user_id, e.target.value)}
+                              className="text-[11px] px-2 py-1 rounded-lg border border-[#d8cfee] bg-[#f8f4ff] text-[#5e4f88]"
+                            >
+                              <option value="ADMIN">ADMIN</option>
+                              <option value="MEMBER">MEMBER</option>
+                            </select>
+                          ) : (
+                            <span className={`text-[11px] px-2 py-1 rounded-full font-semibold ${participant.role === 'ADMIN' ? 'bg-[#d9f0a5] text-[#40520b]' : 'bg-[#ece6ff] text-[#5e4f88]'}`}>
+                              {participant.role}
+                            </span>
+                          )}
+
+                          {groupDetailCurrentUserRole === 'ADMIN' && participant.user_id !== currentUserId && (
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveMember(participant.user_id)}
+                              className="text-[11px] px-2 py-1 rounded-lg bg-red-50 text-red-600 hover:bg-red-100"
+                            >
+                              Remove
+                            </button>
+                          )}
+                        </div>
                       </div>
                     );
                   })}
                 </div>
               </div>
+
+              <button
+                type="button"
+                onClick={handleLeaveActiveGroup}
+                className="w-full py-2.5 rounded-xl font-semibold border border-red-200 bg-red-50 text-red-600 hover:bg-red-100"
+              >
+                Keluar dari Group
+              </button>
             </div>
           </div>
         </div>

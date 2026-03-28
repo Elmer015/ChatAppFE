@@ -130,9 +130,34 @@ export async function getChatDetail(chatId) {
   return request(`/api/chats/detail/${chatId}`);
 }
 
+export async function searchUsersByUsername(username) {
+  const params = new URLSearchParams();
+  if (username && username.trim()) {
+    params.set('username', username.trim());
+  }
+
+  const query = params.toString();
+  const url = query ? `/api/users/search?${query}` : '/api/users/search';
+  return request(url);
+}
+
 export async function createGroupChat(payload) {
   return request('/api/chats/group', {
     method: 'POST',
+    body: payload,
+  });
+}
+
+export async function createPrivateChat(payload) {
+  return request('/api/chats/private', {
+    method: 'POST',
+    body: payload,
+  });
+}
+
+export async function updateGroup(chatId, payload) {
+  return request(`/api/chats/group/edit/${chatId}`, {
+    method: 'PATCH',
     body: payload,
   });
 }
@@ -142,6 +167,30 @@ export async function addGroupMembers(chatId, payload) {
     method: 'POST',
     body: payload,
   });
+}
+
+export async function removeGroupMembers(chatId, payload) {
+  return request(`/api/chats/group/remove/${chatId}`, {
+    method: 'DELETE',
+    body: payload,
+  });
+}
+
+export async function updateGroupMemberRoles(chatId, payload) {
+  return request(`/api/chats/group/change-role/${chatId}`, {
+    method: 'PATCH',
+    body: payload,
+  });
+}
+
+export async function leaveGroup(chatId) {
+  return request(`/api/chats/group/leave/${chatId}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function getChatMessages(chatId) {
+  return request(`/api/chats/messages/${chatId}`);
 }
 
 export async function sendChatMessage(chatId, payload) {
