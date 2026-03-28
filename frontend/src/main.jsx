@@ -2,10 +2,6 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App'
 import './index.css'
-import { initializeDummyChatState, initializeDummyUsers } from './data/mockData'
-
-initializeDummyUsers()
-initializeDummyChatState()
 document.documentElement.classList.remove('dark')
 localStorage.setItem('theme', 'light')
 

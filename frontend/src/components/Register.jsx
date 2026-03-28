@@ -1,16 +1,17 @@
 import React, { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { Mail, Lock, User, ArrowRight, ShieldCheck } from 'lucide-react';
-import { STORAGE_KEYS, getStoredUsers, saveStoredUsers } from '../data/mockData';
+import { decodeJwtPayload, loginUser, registerUser, saveSession } from '../services/api';
 
 export default function Register() {
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const navigate = useNavigate();
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
 
     if (password.length < 8) {
@@ -18,38 +19,36 @@ export default function Register() {
       return;
     }
 
-    const users = getStoredUsers();
-    const alreadyExists = users.some(
-      (user) => user.email.toLowerCase() === email.toLowerCase(),
-    );
-
-    if (alreadyExists) {
-      setError('Email sudah terdaftar. Coba login.');
-      return;
-    }
-
-    const newUser = {
-      id: `u${Date.now()}`,
-      username,
-      email,
-      password,
-      avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(username)}`,
-    };
-
-    const updatedUsers = [...users, newUser];
-    saveStoredUsers(updatedUsers);
-    localStorage.setItem(
-      STORAGE_KEYS.currentUser,
-      JSON.stringify({
-        id: newUser.id,
-        username: newUser.username,
-        email: newUser.email,
-        avatar: newUser.avatar,
-      }),
-    );
-
+    setIsSubmitting(true);
     setError('');
-    navigate('/chat');
+
+    try {
+      await registerUser({
+        username: username.trim(),
+        email: email.trim(),
+        password,
+      });
+
+      const token = await loginUser({
+        username: username.trim(),
+        password,
+      });
+
+      const claims = decodeJwtPayload(token);
+      const currentUser = {
+        id: claims?.sub || '',
+        username: username.trim(),
+        email: email.trim(),
+        avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(username.trim())}`,
+      };
+
+      saveSession(token, currentUser);
+      navigate('/chat');
+    } catch (apiError) {
+      setError(apiError.message || 'Register gagal. Coba lagi.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -154,9 +153,10 @@ export default function Register() {
             {/* Submit Button */}
             <button
               type="submit"
+              disabled={isSubmitting}
               className="w-full flex items-center justify-center gap-2 py-3 px-4 bg-gradient-to-r from-primary-600 to-secondary-600 hover:from-primary-500 hover:to-secondary-500 text-white rounded-xl font-semibold text-sm transition-all duration-300 transform hover:-translate-y-0.5 shadow-lg shadow-primary-500/30 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 dark:focus:ring-offset-gray-900 mt-2"
             >
-              Crate Account
+              {isSubmitting ? 'Creating account...' : 'Create Account'}
               <ArrowRight className="w-4 h-4" />
             </button>
           </form>

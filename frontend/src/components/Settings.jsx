@@ -1,8 +1,16 @@
 import React from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Globe, LogOut, Shield } from 'lucide-react';
+import { clearSession } from '../services/api';
 
 export default function Settings() {
+  const navigate = useNavigate();
+
+  const handleLogout = () => {
+    clearSession();
+    navigate('/login');
+  };
+
   return (
     <div className="min-h-screen bg-[#e7e3f4] py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-2xl mx-auto">
@@ -35,10 +43,10 @@ export default function Settings() {
             <span className="text-sm text-[#75669e]">Buka</span>
           </Link>
 
-          <Link to="/" className="w-full flex items-center justify-center gap-2 py-4 px-4 bg-[#f6f3ff] border border-red-200 text-red-600 hover:bg-red-50 rounded-2xl font-semibold transition-colors shadow-sm">
+          <button onClick={handleLogout} className="w-full flex items-center justify-center gap-2 py-4 px-4 bg-[#f6f3ff] border border-red-200 text-red-600 hover:bg-red-50 rounded-2xl font-semibold transition-colors shadow-sm">
             <LogOut className="w-5 h-5" />
             Log Out
-          </Link>
+          </button>
         </div>
       </div>
     </div>

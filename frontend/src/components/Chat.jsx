@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { 
   Search, 
   MoreVertical, 
@@ -14,8 +14,16 @@ import {
   Settings,
   X
 } from 'lucide-react';
-import { STORAGE_KEYS, getStoredChatState, getStoredUsers, saveStoredChatState } from '../data/mockData';
+import { STORAGE_KEYS, getStoredChatState, getStoredUsers, saveStoredChatState, saveStoredUsers } from '../data/mockData';
 import { decryptMessage, encryptMessage, getRoomSecret } from '../utils/cryptoChat';
+import {
+  addGroupMembers,
+  clearSession,
+  createGroupChat,
+  getChatDetail,
+  getMyChats,
+  sendChatMessage,
+} from '../services/api';
 
 const FAILED_DECRYPT_TEXT = '[Pesan terenkripsi gagal dibuka]';
 const EMOJI_REGEX = /[\p{Extended_Pictographic}\uFE0F]/u;
@@ -65,10 +73,12 @@ function formatDateTime(isoDate) {
 
 export default function Chat() {
   const [chatState, setChatState] = useState(getStoredChatState);
-  const [allUsers] = useState(getStoredUsers);
+  const [allUsers, setAllUsers] = useState(getStoredUsers);
   const [searchQuery, setSearchQuery] = useState('');
   const [newMessage, setNewMessage] = useState('');
   const [messageError, setMessageError] = useState('');
+  const [apiError, setApiError] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
   const [isMobileListVisible, setIsMobileListVisible] = useState(true);
   const [decryptedMessages, setDecryptedMessages] = useState({});
   const [isCreateGroupModalOpen, setIsCreateGroupModalOpen] = useState(false);
@@ -81,6 +91,89 @@ export default function Chat() {
 
   const currentUser = JSON.parse(localStorage.getItem(STORAGE_KEYS.currentUser) || 'null');
   const currentUserId = currentUser?.id || '';
+  const navigate = useNavigate();
+
+  const loadChatsFromApi = async () => {
+    const token = localStorage.getItem(STORAGE_KEYS.authToken);
+    if (!token || !currentUserId) {
+      setApiError('Sesi login tidak ditemukan. Silakan login lagi.');
+      return;
+    }
+
+    setIsLoading(true);
+    setApiError('');
+
+    try {
+      const chats = await getMyChats();
+
+      const usersById = {};
+      if (currentUserId) {
+        usersById[currentUserId] = {
+          id: currentUserId,
+          username: currentUser?.username || 'Me',
+          email: currentUser?.email || '',
+          avatar: currentUser?.avatar
+            || `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(currentUser?.username || currentUserId)}`,
+        };
+      }
+
+      const chatParticipants = [];
+      const normalizedChats = [];
+
+      for (const chat of chats || []) {
+        const detail = await getChatDetail(chat.id);
+
+        normalizedChats.push({
+          id: chat.id,
+          type: chat.type,
+          name: chat.name,
+          created_by: detail?.createdBy || currentUser?.username || 'System',
+          created_at: chat.createdAt || new Date().toISOString(),
+        });
+
+        for (const member of detail?.members || []) {
+          chatParticipants.push({
+            id: `${chat.id}-${member.id}`,
+            chat_id: chat.id,
+            user_id: member.id,
+            role: member.role,
+            joined_at: member.joinedAt || new Date().toISOString(),
+          });
+
+          usersById[member.id] = {
+            id: member.id,
+            username: member.username,
+            email: member.email,
+            avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(member.username || member.id)}`,
+          };
+        }
+      }
+
+      setAllUsers(Object.values(usersById));
+      saveStoredUsers(Object.values(usersById));
+
+      setChatState((prev) => ({
+        chats: normalizedChats,
+        chatParticipants,
+        messages: (prev.messages || []).filter((message) => normalizedChats.some((chat) => chat.id === message.chat_id)),
+        readReceipts: prev.readReceipts || [],
+      }));
+    } catch (error) {
+      const errorMessage = error.message || 'Gagal memuat data chat dari server.';
+      setApiError(errorMessage);
+
+      if (/401|403|unauthorized|forbidden/i.test(errorMessage)) {
+        clearSession();
+        navigate('/login');
+      }
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadChatsFromApi();
+  }, []);
 
   const participantsByChat = useMemo(() => {
     const map = {};
@@ -134,14 +227,8 @@ export default function Chat() {
   }, [allUsers]);
 
   const currentUserChatIds = useMemo(() => {
-    const ids = new Set();
-    for (const participant of chatState.chatParticipants) {
-      if (participant.user_id === currentUserId) {
-        ids.add(participant.chat_id);
-      }
-    }
-    return ids;
-  }, [chatState.chatParticipants, currentUserId]);
+    return new Set(chatState.chats.map((chat) => chat.id));
+  }, [chatState.chats]);
 
   const chatList = useMemo(() => {
     const rows = [];
@@ -172,6 +259,9 @@ export default function Chat() {
           title = otherUser.username;
           avatar = otherUser.avatar;
           isOnline = ['u2', 'u4'].includes(otherUser.id);
+        } else if (chat.name) {
+          title = chat.name;
+          avatar = `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(chat.name)}`;
         }
       }
 
@@ -351,10 +441,35 @@ export default function Chat() {
       };
     }
 
-    setChatState((prev) => ({
-      ...prev,
-      messages: [...prev.messages, outgoingMessage],
-    }));
+    try {
+      const response = await sendChatMessage(activeChat.id, {
+        content: outgoingMessage.content,
+        iv: outgoingMessage.iv,
+        type: outgoingMessage.type,
+      });
+
+      const senderId = response?.sender === currentUser?.username
+        ? currentUserId
+        : (allUsers.find((u) => u.username === response?.sender)?.id || response?.sender || currentUserId);
+
+      const persistedMessage = {
+        id: response?.id || messageId,
+        chat_id: activeChat.id,
+        sender_id: senderId,
+        content: response?.content || outgoingMessage.content,
+        iv: response?.iv ?? outgoingMessage.iv,
+        type: response?.type || 'TEXT',
+        created_at: response?.time || nowIso,
+      };
+
+      setChatState((prev) => ({
+        ...prev,
+        messages: [...prev.messages, persistedMessage],
+      }));
+    } catch (error) {
+      setMessageError(error.message || 'Gagal mengirim pesan ke server.');
+      return;
+    }
 
     setNewMessage('');
     setMessageError('');
@@ -372,71 +487,42 @@ export default function Chat() {
     setIsGroupDetailModalOpen(true);
   };
 
-  const handleCreateGroup = (e) => {
+  const handleCreateGroup = async (e) => {
     e.preventDefault();
     if (!newGroupName.trim() || newGroupMembers.length === 0 || !currentUserId) return;
 
-    const now = new Date().toISOString();
-    const chatId = createUuid();
+    try {
+      const response = await createGroupChat({
+        name: newGroupName.trim(),
+        memberIds: newGroupMembers,
+      });
 
-    const newChat = {
-      id: chatId,
-      type: 'GROUP',
-      name: newGroupName.trim(),
-      created_by: currentUserId,
-      created_at: now,
-    };
+      await loadChatsFromApi();
 
-    const newParticipants = [
-      {
-        id: createUuid(),
-        chat_id: chatId,
-        user_id: currentUserId,
-        role: 'ADMIN',
-        joined_at: now,
-      },
-      ...newGroupMembers.map((userId) => ({
-        id: createUuid(),
-        chat_id: chatId,
-        user_id: userId,
-        role: 'MEMBER',
-        joined_at: now,
-      })),
-    ];
-
-    setChatState((prev) => ({
-      ...prev,
-      chats: [...prev.chats, newChat],
-      chatParticipants: [...prev.chatParticipants, ...newParticipants],
-    }));
-
-    setNewGroupName('');
-    setNewGroupMembers([]);
-    setIsCreateGroupModalOpen(false);
-    setActiveChatId(chatId);
-    setIsMobileListVisible(false);
+      setNewGroupName('');
+      setNewGroupMembers([]);
+      setIsCreateGroupModalOpen(false);
+      setActiveChatId(response?.id || '');
+      setIsMobileListVisible(false);
+      setApiError('');
+    } catch (error) {
+      setApiError(error.message || 'Gagal membuat group.');
+    }
   };
 
-  const handleAddMembersToGroup = (e) => {
+  const handleAddMembersToGroup = async (e) => {
     e.preventDefault();
     if (!activeChat || activeChat.type !== 'GROUP' || membersToAdd.length === 0) return;
 
-    const now = new Date().toISOString();
-    const newParticipants = membersToAdd.map((userId) => ({
-      id: createUuid(),
-      chat_id: activeChat.id,
-      user_id: userId,
-      role: 'MEMBER',
-      joined_at: now,
-    }));
-
-    setChatState((prev) => ({
-      ...prev,
-      chatParticipants: [...prev.chatParticipants, ...newParticipants],
-    }));
-
-    setMembersToAdd([]);
-    setIsAddMemberModalOpen(false);
+    try {
+      await addGroupMembers(activeChat.id, { userIds: membersToAdd });
+      await loadChatsFromApi();
+      setMembersToAdd([]);
+      setIsAddMemberModalOpen(false);
+      setApiError('');
+    } catch (error) {
+      setApiError(error.message || 'Gagal menambah anggota group.');
+    }
   };
 
   const getMessageStatus = (message) => {
@@ -499,6 +585,14 @@ export default function Chat() {
               className="w-full pl-10 pr-4 py-2 bg-[#ede7ff] border border-[#ddd4f2] rounded-xl text-sm text-[#23114b] focus:outline-none focus:ring-2 focus:ring-[#b7d62e] placeholder-[#7f72a5] transition-shadow"
             />
           </div>
+
+          {isLoading && (
+            <p className="mt-2 text-xs text-[#6f6195]">Memuat chat dari server...</p>
+          )}
+
+          {apiError && (
+            <p className="mt-2 text-xs text-red-600">{apiError}</p>
+          )}
         </div>
 
         {/* Chat List */}

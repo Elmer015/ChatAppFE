@@ -2,6 +2,7 @@ import React, { useState, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowLeft, User, Mail, Shield, Key, Edit2, Upload, X, Check, Eye, EyeOff } from 'lucide-react';
 import { STORAGE_KEYS } from '../data/mockData';
+import { updateCurrentUser } from '../services/api';
 
 export default function Profile() {
   const [isEditing, setIsEditing] = useState(false);
@@ -66,18 +67,28 @@ export default function Profile() {
     setUploadMethod('file');
   };
 
-  const handleSave = () => {
-    setIsEditing(false);
-    const currentUser = JSON.parse(localStorage.getItem(STORAGE_KEYS.currentUser) || '{}');
-    localStorage.setItem(STORAGE_KEYS.currentUser, JSON.stringify({
-      ...currentUser,
-      username: profileData.username,
-      email: profileData.email,
-      avatar: profileData.avatar,
-    }));
+  const handleSave = async () => {
+    try {
+      await updateCurrentUser({
+        username: profileData.username,
+        email: profileData.email,
+      });
+
+      const currentUser = JSON.parse(localStorage.getItem(STORAGE_KEYS.currentUser) || '{}');
+      localStorage.setItem(STORAGE_KEYS.currentUser, JSON.stringify({
+        ...currentUser,
+        username: profileData.username,
+        email: profileData.email,
+        avatar: profileData.avatar,
+      }));
+
+      setIsEditing(false);
+    } catch (error) {
+      setPasswordError(error.message || 'Gagal update profil.');
+    }
   };
 
-  const handlePasswordChange = () => {
+  const handlePasswordChange = async () => {
     setPasswordError('');
     setPasswordSuccess('');
 
@@ -99,33 +110,29 @@ export default function Profile() {
       return;
     }
 
-    // Check current password
-    const currentUser = JSON.parse(localStorage.getItem(STORAGE_KEYS.currentUser) || 'null');
-    if (passwordForm.currentPassword !== currentUser?.password) {
-      setPasswordError('Current password is incorrect');
-      return;
-    }
-
     // Check new password is different from current password
     if (passwordForm.newPassword === passwordForm.currentPassword) {
       setPasswordError('New password must be different from your current password');
       return;
     }
 
-    // Update password
-    localStorage.setItem(STORAGE_KEYS.currentUser, JSON.stringify({
-      ...currentUser,
-      password: passwordForm.newPassword,
-    }));
+    try {
+      await updateCurrentUser({
+        prevPassword: passwordForm.currentPassword,
+        newPassword: passwordForm.newPassword,
+      });
 
-    setPasswordSuccess('Password changed successfully!');
-    setTimeout(() => {
-      setShowPasswordModal(false);
-      setPasswordForm({ currentPassword: '', snewPassword: '', confirmPassword: '' });
-      setPasswordError('');
-      setPasswordSuccess('');
-      setShowPasswords({ current: false, new: false, confirm: false });
-    }, 2000);
+      setPasswordSuccess('Password changed successfully!');
+      setTimeout(() => {
+        setShowPasswordModal(false);
+        setPasswordForm({ currentPassword: '', newPassword: '', confirmPassword: '' });
+        setPasswordError('');
+        setPasswordSuccess('');
+        setShowPasswords({ current: false, new: false, confirm: false });
+      }, 2000);
+    } catch (error) {
+      setPasswordError(error.message || 'Gagal mengganti password.');
+    }
   };
 
   const handlePasswordCancel = () => {

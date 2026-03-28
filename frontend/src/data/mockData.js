@@ -1,6 +1,7 @@
 export const STORAGE_KEYS = {
   users: 'blockchat_users',
   currentUser: 'blockchat_current_user',
+  authToken: 'blockchat_auth_token',
   chatState: 'blockchat_chat_state',
 };
 
@@ -274,6 +275,15 @@ function cloneState(state) {
   return JSON.parse(JSON.stringify(state));
 }
 
+function createEmptyChatState() {
+  return {
+    chats: [],
+    chatParticipants: [],
+    messages: [],
+    readReceipts: [],
+  };
+}
+
 export function initializeDummyChatState() {
   if (typeof window === 'undefined') return;
   const chatState = localStorage.getItem(STORAGE_KEYS.chatState);
@@ -284,7 +294,7 @@ export function initializeDummyChatState() {
 
 export function getStoredChatState() {
   const stored = localStorage.getItem(STORAGE_KEYS.chatState);
-  if (!stored) return cloneState(DUMMY_CHAT_STATE);
+  if (!stored) return createEmptyChatState();
 
   try {
     const parsed = JSON.parse(stored);
@@ -295,12 +305,12 @@ export function getStoredChatState() {
       || !Array.isArray(parsed.messages)
       || !Array.isArray(parsed.readReceipts)
     ) {
-      return cloneState(DUMMY_CHAT_STATE);
+      return createEmptyChatState();
     }
 
     return parsed;
   } catch (error) {
-    return cloneState(DUMMY_CHAT_STATE);
+    return createEmptyChatState();
   }
 }
 
